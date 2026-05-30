@@ -40,7 +40,7 @@ const OrderService = {
     },
 
     async createOrder(userId: string, payload: any) {
-        const { items, shippingAddress, paymentMethod, couponCode, note } = payload;
+        const { items, shippingAddress, paymentMethod, couponCode, note, transactionId, senderNumber } = payload;
 
         // Get product details and calculate totals
         let subtotal = 0;
@@ -68,14 +68,22 @@ const OrderService = {
 
         // Apply coupon
         let discount = 0;
+        let appliedCoupon: any = null;
         if (couponCode) {
             const coupon = await Coupon.findOne({ code: couponCode.toUpperCase(), isActive: true });
             if (coupon && coupon.expiresAt > new Date()) {
-                if (coupon.discountType === 'percentage') {
-                    discount = (subtotal * coupon.discountValue) / 100;
-                    if (coupon.maxDiscount) discount = Math.min(discount, coupon.maxDiscount);
-                } else {
-                    discount = coupon.discountValue;
+                // Respect usage limit & minimum order amount
+                const limitReached = coupon.usageLimit && coupon.usedCount >= coupon.usageLimit;
+                const meetsMin = subtotal >= coupon.minOrderAmount;
+                if (!limitReached && meetsMin) {
+                    if (coupon.discountType === 'percentage') {
+                        discount = (subtotal * coupon.discountValue) / 100;
+                        if (coupon.maxDiscount) discount = Math.min(discount, coupon.maxDiscount);
+                    } else {
+                        discount = coupon.discountValue;
+                    }
+                    discount = Math.min(discount, subtotal); // never exceed subtotal
+                    appliedCoupon = coupon;
                 }
             }
         }
@@ -92,10 +100,17 @@ const OrderService = {
             shippingCost,
             discount,
             total,
-            couponCode: couponCode || '',
+            couponCode: appliedCoupon ? appliedCoupon.code : '',
             paymentMethod,
+            transactionId: transactionId || '',
+            senderNumber: senderNumber || '',
             note: note || '',
-            timeline: [{ status: 'pending', note: 'Order placed successfully' }],
+            timeline: [{
+                status: 'pending',
+                note: ['bkash', 'nagad'].includes(paymentMethod)
+                    ? `Order placed — ${paymentMethod} payment submitted (Txn: ${transactionId || 'N/A'}), awaiting verification`
+                    : 'Order placed successfully',
+            }],
         });
 
         // Update stock and product sold count
@@ -107,6 +122,11 @@ const OrderService = {
 
         // Update user stats
         await User.findByIdAndUpdate(userId, { $inc: { totalOrders: 1, totalSpent: total } });
+
+        // Increment coupon usage count
+        if (appliedCoupon) {
+            await Coupon.findByIdAndUpdate(appliedCoupon._id, { $inc: { usedCount: 1 } });
+        }
 
         return order;
     },
